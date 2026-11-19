@@ -147,10 +147,35 @@ class AbstractAPIKey(models.Model):
 
     def save(self, *args: typing.Any, **kwargs: typing.Any) -> None:
         self._validate_revoked()
+
+        # `update_fields` may also be passed positionally, as in
+        # `save(False, False, None, ["name"])`.
+        update_fields = kwargs.get("update_fields")
+        if update_fields is None and len(args) >= 4:
+            update_fields = args[3]
+        if update_fields is None or "revoked" in update_fields:
+            self._validate_not_revoked_in_db()
+
         super().save(*args, **kwargs)
+        # Remember the persisted state so that re-saving this instance with
+        # `revoked=False` is rejected too, instead of restoring access.
+        self._initial_revoked = self.revoked
 
     def _validate_revoked(self) -> None:
         if self._initial_revoked and not self.revoked:
+            raise ValidationError(
+                _("The API key has been revoked, which cannot be undone.")
+            )
+
+    def _validate_not_revoked_in_db(self) -> None:
+        # A revocation performed elsewhere since this instance was loaded must
+        # not be undone by saving a stale copy of the record.
+        if (
+            self.pk
+            and not self._state.adding
+            and not self.revoked
+            and type(self)._base_manager.filter(pk=self.pk, revoked=True).exists()
+        ):
             raise ValidationError(
                 _("The API key has been revoked, which cannot be undone.")
             )

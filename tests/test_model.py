@@ -49,6 +49,72 @@ def test_cannot_unrevoke() -> None:
         api_key.clean()
 
 
+def test_cannot_unrevoke_after_revoking_in_same_instance() -> None:
+    api_key, generated_key = APIKey.objects.create_key(name="test")
+    assert APIKey.objects.is_valid(generated_key)
+
+    # Revoke through this very instance, as the admin does on `save_model()`.
+    api_key.revoked = True
+    api_key.save()
+
+    # Re-saving the same instance with `revoked` cleared must not restore access.
+    api_key.revoked = False
+    with pytest.raises(ValidationError):
+        api_key.save()
+
+    # Revoking twice is a no-op and keeps the key unusable.
+    api_key.revoked = True
+    api_key.save()
+    api_key.revoked = True
+    api_key.save()
+
+    refreshed = APIKey.objects.get(pk=api_key.pk)
+    assert refreshed.revoked is True
+    assert APIKey.objects.is_valid(generated_key) is False
+
+
+def test_cannot_unrevoke_by_saving_a_stale_instance() -> None:
+    api_key, generated_key = APIKey.objects.create_key(name="test")
+    stale = APIKey.objects.get(pk=api_key.pk)  # Loaded before the revocation.
+
+    # Revoke through a separate instance.
+    revoker = APIKey.objects.get(pk=api_key.pk)
+    revoker.revoked = True
+    revoker.save()
+
+    # Saving the stale copy must not write `revoked=False` back to the database.
+    stale.name = "renamed"
+    with pytest.raises(ValidationError):
+        stale.save()
+
+    refreshed = APIKey.objects.get(pk=api_key.pk)
+    assert refreshed.revoked is True
+    assert refreshed.name == "test"
+    assert APIKey.objects.is_valid(generated_key) is False
+
+
+def test_stale_instance_can_still_update_other_fields() -> None:
+    api_key, generated_key = APIKey.objects.create_key(name="test")
+    stale = APIKey.objects.get(pk=api_key.pk)
+
+    revoker = APIKey.objects.get(pk=api_key.pk)
+    revoker.revoked = True
+    revoker.save()
+
+    # Updates that explicitly leave `revoked` alone are still allowed, whether
+    # `update_fields` is passed by keyword or positionally.
+    stale.name = "keyword"
+    stale.save(update_fields=["name"])
+    assert APIKey.objects.get(pk=api_key.pk).name == "keyword"
+
+    stale.name = "positional"
+    stale.save(False, False, None, ["name"])
+    refreshed = APIKey.objects.get(pk=api_key.pk)
+    assert refreshed.name == "positional"
+    assert refreshed.revoked is True
+    assert APIKey.objects.is_valid(generated_key) is False
+
+
 @pytest.mark.parametrize(
     "expiry_date, has_expired",
     [(None, False), (NOW, True), (TOMORROW, False), (YESTERDAY, True)],
